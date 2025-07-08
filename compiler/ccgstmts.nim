@@ -239,6 +239,12 @@ proc blockLeaveActions(p: BProc, howManyTrys, howManyExcepts: int) =
       if not tryStmt.inExcept:
         p.s(cpsStmts).addCallStmt(cgsymValue(p.module, "popSafePoint"))
 
+    # If we're currently in an except block for this try statement,
+    # we need to pop the current exception since we're leaving the except block
+    # via abnormal control flow (return, break, etc.)
+    if tryStmt.inExcept and noSafePoints notin p.flags:
+      p.s(cpsStmts).addCallStmt(cgsymValue(p.module, "popCurrentException"))
+
     # Pop this try-stmt of the list of nested trys
     # so we don't infinite recurse on it in the next step.
     stack.add(tryStmt)
@@ -256,10 +262,10 @@ proc blockLeaveActions(p: BProc, howManyTrys, howManyExcepts: int) =
     p.nestedTryStmts.add(stack[i])
 
   # Pop exceptions that was handled by the
-  # except-blocks we are in
-  if noSafePoints notin p.flags:
-    for i in countdown(howManyExcepts-1, 0):
-      p.s(cpsStmts).addCallStmt(cgsymValue(p.module, "popCurrentException"))
+  # except-blocks we are in (this is now handled above per try statement)
+  # if noSafePoints notin p.flags:
+  #   for i in countdown(howManyExcepts-1, 0):
+  #     p.s(cpsStmts).addCallStmt(cgsymValue(p.module, "popCurrentException"))
 
 proc genGotoState(p: BProc, n: PNode) =
   # we resist the temptation to translate it into duff's device as it later
@@ -1291,7 +1297,7 @@ proc genTryCpp(p: BProc, t: PNode, d: var TLoc) =
           p.s(cpsStmts).add("}\n")
         catchAllPresent = true
       else:
-        for j in 0..<t[i].len-1:
+        for j in 0..<t[i].len - 1:
           var typeNode = t[i][j]
           if t[i][j].isInfixAs():
             typeNode = t[i][j][1]
@@ -1665,7 +1671,7 @@ proc genTrySetjmp(p: BProc, t: PNode, d: var TLoc) =
     isScope = true
     startBlockWith(p):
       quirkyScope = initScope(p.s(cpsStmts))
-  p.nestedTryStmts[^1].inExcept = true
+  # Note: inExcept flag is now set individually for each except branch
   var i = 1
   var exceptIf = default(IfBuilder)
   var exceptIfInited = false
@@ -1682,7 +1688,14 @@ proc genTrySetjmp(p: BProc, t: PNode, d: var TLoc) =
           scope = initScope(p.s(cpsStmts))
       if not quirkyExceptions:
         p.s(cpsStmts).addFieldAssignment(safePoint, "status", cIntValue(0))
+      # Set a flag to track that we're in an except block handling an exception
+      let prevInExceptState = p.nestedTryStmts[^1].inExcept
+      if not prevInExceptState:
+        p.nestedTryStmts[^1].inExcept = true
       expr(p, t[i][0], d)
+      # Restore the previous state and pop the exception if we reach here normally
+      if not prevInExceptState:
+        p.nestedTryStmts[^1].inExcept = prevInExceptState
       p.s(cpsStmts).addCallStmt(cgsymValue(p.module, "popCurrentException"))
       endBlockWith(p):
         if exceptIfInited:
@@ -1723,7 +1736,14 @@ proc genTrySetjmp(p: BProc, t: PNode, d: var TLoc) =
         initElifBranch(p.s(cpsStmts), exceptIf, orExpr)
       if not quirkyExceptions:
         p.s(cpsStmts).addFieldAssignment(safePoint, "status", cIntValue(0))
+      # Set a flag to track that we're in an except block handling an exception
+      let prevInExceptState = p.nestedTryStmts[^1].inExcept
+      if not prevInExceptState:
+        p.nestedTryStmts[^1].inExcept = true
       expr(p, t[i][^1], d)
+      # Restore the previous state and pop the exception if we reach here normally
+      if not prevInExceptState:
+        p.nestedTryStmts[^1].inExcept = prevInExceptState
       p.s(cpsStmts).addCallStmt(cgsymValue(p.module, "popCurrentException"))
       endBlockWith(p):
         finishBranch(p.s(cpsStmts), exceptIf)
